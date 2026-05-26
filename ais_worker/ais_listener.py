@@ -10,7 +10,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 # 1. 設定エリア
 # ==========================================
 # ★ここにAisStreamのAPIキーを入力してください
-AIS_API_KEY = "ここにAisStreamのAPIキー"
+AIS_API_KEY = "2ec9dc1fe4dfa685ace12e3e3b23fd2c7582628e"
 WEBHOOK_URL = "https://fair-winds.official.jp/api/update_ais.php"
 WEBHOOK_SECRET = "fair_winds_secret_2026"
 
