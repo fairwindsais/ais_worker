@@ -23,7 +23,7 @@ WEBHOOK_SECRET = "fair_winds_secret_2026"
 # 自動設定エリア（書き換え不要）
 # ==========================================
 WEBHOOK_URL = f"https://{MY_DOMAIN}/api/update_ais.php"
-GET_MMSI_URL = f"https://{MY_DOMAIN}/api/get_tracking_mmsi.php" # 「s」なし設定
+GET_MMSI_URL = f"https://{MY_DOMAIN}/api/get_tracking_mmsi.php"
 
 # グローバル変数（全機能で共有するデータ）
 current_tracking_mmsis = [] # 今監視しているMMSIリスト
@@ -63,7 +63,8 @@ def fetch_mmsi_list():
             new_list = response.json()
             
             if set(new_list) != set(current_tracking_mmsis):
-                print(f"🔄 監視対象のMMSIリストが更新されました: {len(new_list)}隻")
+                # 🛠️ ログ強化：更新時に監視対象のMMSIリストを具体的に出力
+                print(f"🔄 監視対象のMMSIリストが更新されました: {len(new_list)}隻 {new_list}")
                 current_tracking_mmsis = new_list
                 needs_resubscribe = True
             return new_list
@@ -95,7 +96,8 @@ async def listen_ais():
                         "BoundingBoxes": [[[34.8, 139.5], [35.7, 140.2]]]
                     }
                 else:
-                    print(f"📡 【ピンポイント監視】{len(current_tracking_mmsis)}隻のみ追跡を開始します。")
+                    # 🛠️ ログ強化：開始時に監視対象のMMSIリストを具体的に出力
+                    print(f"📡 【ピンポイント監視】{len(current_tracking_mmsis)}隻の追跡を開始します。対象MMSI: {current_tracking_mmsis}")
                     subscription_message = {
                         "APIKey": AIS_API_KEY,
                         "FiltersShipMMSI": current_tracking_mmsis
@@ -106,7 +108,8 @@ async def listen_ais():
 
                 async for message_json in websocket:
                     if needs_resubscribe:
-                        print("📡 MMSIリストが更新されたので、新しい注文を送信します。")
+                        # 🛠️ ログ強化：注文出し直し時にも最新リストを出力
+                        print(f"📡 MMSIリストが更新されたので、新しい注文を送信します。対象MMSI: {current_tracking_mmsis}")
                         new_subscription_message = {
                             "APIKey": AIS_API_KEY,
                             "FiltersShipMMSI": current_tracking_mmsis
@@ -121,32 +124,35 @@ async def listen_ais():
                         report = message.get("Message", {}).get("PositionReport", {})
                         
                         mmsi = meta.get("MMSI")
-                        ship_name = meta.get("ShipName", "不明")
+                        ship_name = meta.get("ShipName", "不明").strip()
                         lat = report.get("Latitude")
                         lon = report.get("Longitude")
-                        cog = report.get("Cog") # ★追加：針路
-                        sog = report.get("Sog") # ★追加：速力
+                        cog = report.get("Cog")
+                        sog = report.get("Sog")
                         status = report.get("NavigationalStatus", "不明")
 
                         if not current_tracking_mmsis or str(mmsi) in current_tracking_mmsis:
-                            print(f"🚢 ターゲット受信！ [{mmsi}] {ship_name} => 転送中...")
+                            print(f"🚢 ターゲット受信！ [{mmsi}] {ship_name} (Lat: {lat}, Lon: {lon})")
                             
                             payload = {
                                 "secret": WEBHOOK_SECRET,
                                 "mmsi": mmsi,
                                 "lat": lat,
                                 "lon": lon,
-                                "cog": cog, # ★追加：針路
-                                "sog": sog, # ★追加：速力
+                                "cog": cog,
+                                "sog": sog,
                                 "status": status,
-                                "dest": meta.get("Destination", ""),
-                                "eta": meta.get("ETA", "")
+                                "dest": meta.get("Destination", "").strip(),
+                                "eta": meta.get("ETA", "").strip()
                             }
                             
                             try:
                                 response = requests.post(WEBHOOK_URL, json=payload, timeout=5)
-                                if response.status_code != 200:
-                                    print(f" ❌ 転送拒否: {response.status_code} ({response.text})")
+                                if response.status_code == 200:
+                                    # 🛠️ ログ強化：データベースへの送信が成功した時に完了ログを出力
+                                    print(f" 🚀 データベースへの送信完了: {response.text}")
+                                else:
+                                    print(f" ❌ 転送拒否: サーバー応答 {response.status_code} ({response.text})")
                             except Exception as e:
                                 print(f" ❌ 通信エラー: {e}")
 
