@@ -4,6 +4,7 @@ import json
 import requests
 import os
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # ==========================================
@@ -12,8 +13,21 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 # AisStreamのAPIキー
 AIS_API_KEY = "2ec9dc1fe4dfa685ace12e3e3b23fd2c7582628e"
 
-# スターサーバーのデータ受け取りURL（api/update_ais.phpのURL）
-WEBHOOK_URL = "https://fair-winds.official.jp/api/update_ais.php"
+# スターサーバーのドメイン（例: example.com）
+MY_DOMAIN = "fair-winds.official.jp"
+
+# Webhookの合言葉（PHPと同じもの）
+WEBHOOK_SECRET = "fair_winds_secret_2026"
+
+# ==========================================
+# 自動設定エリア（書き換え不要）
+# ==========================================
+WEBHOOK_URL = f"https://{MY_DOMAIN}/api/update_ais.php"
+GET_MMSI_URL = f"https://{MY_DOMAIN}/api/get_tracking_mmsi.php"
+
+# グローバル変数（全機能で共有するデータ）
+current_tracking_mmsis = [] # 今監視しているMMSIリスト
+needs_resubscribe = False # 注文をやり直す必要があるかどうかのフラグ
 
 # ==========================================
 # 2. Renderスリープ防止用のダミーWebサーバー
@@ -25,7 +39,6 @@ class DummyHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"AIS Worker is running!")
     
-    # Cronからの curl -I (HEADリクエスト) に 200 OK で返すための追加設定
     def do_HEAD(self):
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
@@ -38,23 +51,74 @@ def run_dummy_server():
     server.serve_forever()
 
 # ==========================================
-# 3. AISデータ受信＆転送メイン処理
+# 3. レンタルサーバーからMMSIリストを取得する関数
+# ==========================================
+def fetch_mmsi_list():
+    global current_tracking_mmsis, needs_resubscribe
+    try:
+        # 合言葉を添えて、最新のMMSIリストを要求
+        payload = {"secret": WEBHOOK_SECRET}
+        response = requests.post(GET_MMSI_URL, json=payload, timeout=10)
+        
+        if response.status_code == 200:
+            new_list = response.json()
+            
+            # リストが前と変わっていたら、AisStreamに注文を出し直すフラグを立てる
+            if set(new_list) != set(current_tracking_mmsis):
+                print(f"🔄 監視対象のMMSIリストが更新されました: {len(new_list)}隻")
+                current_tracking_mmsis = new_list
+                needs_resubscribe = True
+            return new_list
+        else:
+            print(f"⚠️ MMSIリストの取得失敗 (サーバー応答 {response.status_code})")
+            return []
+            
+    except Exception as e:
+        print(f"⚠️ MMSIリスト取得時に通信エラー: {e}")
+        return []
+
+# ==========================================
+# 4. AISデータ受信＆転送メイン処理
 # ==========================================
 async def listen_ais():
+    global needs_resubscribe
+    
     while True:
         try:
             async with websockets.connect("wss://stream.aisstream.io/v0/stream") as websocket:
-                print("✅ AisStreamに接続しました。東京湾のデータを受信待機中...")
+                print("✅ AisStreamに接続しました。")
                 
-                # 絞り込みなし！東京湾のすべての船のデータを要求する
-                subscription_message = {
-                    "APIKey": AIS_API_KEY,
-                    "BoundingBoxes": [[[34.8, 139.5], [35.7, 140.2]]]
-                }
+                # 最初は最新のMMSIリストを読み込んでから注文する
+                fetch_mmsi_list()
+                
+                if not current_tracking_mmsis:
+                    print("⚠️ 監視対象のMMSIが登録されていません。東京湾の全部乗せでテストします。")
+                    subscription_message = {
+                        "APIKey": AIS_API_KEY,
+                        "BoundingBoxes": [[[34.8, 139.5], [35.7, 140.2]]]
+                    }
+                else:
+                    print(f"📡 【ピンポイント監視】{len(current_tracking_mmsis)}隻のみ追跡を開始します。")
+                    # エリア指定は削除！MMSIの指名手配だけにする
+                    subscription_message = {
+                        "APIKey": AIS_API_KEY,
+                        "FiltersShipMMSI": current_tracking_mmsis
+                    }
                 
                 await websocket.send(json.dumps(subscription_message))
+                needs_resubscribe = False
 
                 async for message_json in websocket:
+                    # 5分に1回行われる定期更新タスクによってフラグが立ったら、特等席を譲らずに注文だけ出し直す
+                    if needs_resubscribe:
+                        print("📡 MMSIリストが更新されたので、新しい注文を送信します。")
+                        new_subscription_message = {
+                            "APIKey": AIS_API_KEY,
+                            "FiltersShipMMSI": current_tracking_mmsis
+                        }
+                        await websocket.send(json.dumps(new_subscription_message))
+                        needs_resubscribe = False
+                    
                     message = json.loads(message_json)
                     
                     if message["MessageType"] == "PositionReport":
@@ -67,41 +131,54 @@ async def listen_ais():
                         lon = report.get("Longitude")
                         status = report.get("NavigationalStatus", "不明")
 
-                        print(f"🚢 [{mmsi}] {ship_name} の位置情報を受信！ => 転送中...")
-                        
-                        # レンタルサーバーへデータを転送
-                        payload = {
-                            "secret": "fair_winds_secret_2026", # 🔑 PHPと同じ合言葉を追加！
-                            "mmsi": mmsi,
-                            "lat": lat,
-                            "lon": lon,
-                            "status": status,
-                            "dest": "",
-                            "eta": ""
-                        }
-                        
-                        try:
-                            # 📦 data= ではなく json= に変更して送信！
-                            response = requests.post(WEBHOOK_URL, json=payload, timeout=5)
+                        # 今見張っているMMSIリストに含まれる船だけを転送する（ダブルチェック）
+                        # ※東京湾全部乗せテスト中はこのチェックをスキップ
+                        if not current_tracking_mmsis or str(mmsi) in current_tracking_mmsis:
+                            print(f"🚢 ターゲット受信！ [{mmsi}] {ship_name} => 転送中...")
                             
-                            # サーバーからエラー（200 OK 以外）が返ってきたらログに出す
-                            if response.status_code != 200:
-                                print(f" ❌ 転送拒否: サーバー応答 {response.status_code} ({response.text})")
-                                
-                        except Exception as e:
-                            print(f" ❌ 通信エラー: {e}")
+                            payload = {
+                                "secret": WEBHOOK_SECRET,
+                                "mmsi": mmsi,
+                                "lat": lat,
+                                "lon": lon,
+                                "status": status,
+                                "dest": meta.get("Destination", ""), # 目的地も取得
+                                "eta": meta.get("ETA", "") # 到着予定も取得
+                            }
+                            
+                            try:
+                                response = requests.post(WEBHOOK_URL, json=payload, timeout=5)
+                                if response.status_code != 200:
+                                    print(f" ❌ 転送拒否: {response.status_code} ({response.text})")
+                            except Exception as e:
+                                print(f" ❌ 通信エラー: {e}")
 
         except Exception as e:
-            # 接続が切れた場合、理由を表示して3秒後に自動復活する
             print(f"⚠️ 接続エラー。3秒後に再接続します... (理由: {e})")
             await asyncio.sleep(3)
 
 # ==========================================
-# 4. 実行開始
+# 5. 【完全自動化】5分おきにMMSIリストを確認する定期タスク
+# ==========================================
+def run_mmsi_updater():
+    print("⏰ MMSIリストの自動更新タスク（5分おき）を開始します。")
+    # AisStreamへのWebSocket接続が安定してから動き出すように、最初に少し待つ
+    time.sleep(30)
+    while True:
+        # 切断・再接続の奪い合いの原因にならないよう、別スレッドでこっそりPHPを見に行く
+        fetch_mmsi_list()
+        # 5分待つ
+        time.sleep(300)
+
+# ==========================================
+# 6. 実行開始
 # ==========================================
 if __name__ == "__main__":
-    # ダミーWebサーバーを別スレッドで起動
+    # 1. ダミーWebサーバーを起動
     threading.Thread(target=run_dummy_server, daemon=True).start()
     
-    # AIS受信の無限ループを開始
+    # 2. MMSIリストの自動更新タスクを別スレッドで起動
+    threading.Thread(target=run_mmsi_updater, daemon=True).start()
+    
+    # 3. AIS受信の無限ループをメインスレッドで開始
     asyncio.run(listen_ais())
