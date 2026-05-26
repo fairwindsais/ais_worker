@@ -71,6 +71,7 @@ async def listen_ais():
                         
                         # レンタルサーバーへデータを転送
                         payload = {
+                            "secret": "fair_winds_secret_2026", # 🔑 PHPと同じ合言葉を追加！
                             "mmsi": mmsi,
                             "lat": lat,
                             "lon": lon,
@@ -80,10 +81,15 @@ async def listen_ais():
                         }
                         
                         try:
-                            # タイムアウトを設けてサーバーの負担を減らす
-                            response = requests.post(WEBHOOK_URL, data=payload, timeout=5)
+                            # 📦 data= ではなく json= に変更して送信！
+                            response = requests.post(WEBHOOK_URL, json=payload, timeout=5)
+                            
+                            # サーバーからエラー（200 OK 以外）が返ってきたらログに出す
+                            if response.status_code != 200:
+                                print(f" ❌ 転送拒否: サーバー応答 {response.status_code} ({response.text})")
+                                
                         except Exception as e:
-                            print(f" ❌ サーバーへの転送失敗: {e}")
+                            print(f" ❌ 通信エラー: {e}")
 
         except Exception as e:
             # 接続が切れた場合、理由を表示して3秒後に自動復活する
