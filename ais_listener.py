@@ -14,7 +14,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 AIS_API_KEY = "2ec9dc1fe4dfa685ace12e3e3b23fd2c7582628e"
 
 # スターサーバーのドメイン（例: example.com）
-MY_DOMAIN = "fair-winds.official.jp"
+MY_DOMAIN = 'fair-winds.official.jp'
 
 # Webhookの合言葉（PHPと同じもの）
 WEBHOOK_SECRET = "fair_winds_secret_2026"
@@ -63,7 +63,6 @@ def fetch_mmsi_list():
             new_list = response.json()
             
             if set(new_list) != set(current_tracking_mmsis):
-                # 🛠️ ログ強化：更新時に監視対象のMMSIリストを具体的に出力
                 print(f"🔄 監視対象のMMSIリストが更新されました: {len(new_list)}隻 {new_list}")
                 current_tracking_mmsis = new_list
                 needs_resubscribe = True
@@ -96,10 +95,10 @@ async def listen_ais():
                         "BoundingBoxes": [[[34.8, 139.5], [35.7, 140.2]]]
                     }
                 else:
-                    # 🛠️ ログ強化：開始時に監視対象のMMSIリストを具体的に出力
-                    print(f"📡 【ピンポイント監視】{len(current_tracking_mmsis)}隻の追跡を開始します。対象MMSI: {current_tracking_mmsis}")
+                    print(f"📡 【全世界・ピンポイント監視】{len(current_tracking_mmsis)}隻の追跡を開始します。対象MMSI: {current_tracking_mmsis}")
                     subscription_message = {
                         "APIKey": AIS_API_KEY,
+                        "BoundingBoxes": [[[-90, -180], [90, 180]]], # 🌍 エリア指定を必須とするため、全世界を指定！
                         "FiltersShipMMSI": current_tracking_mmsis
                     }
                 
@@ -108,10 +107,10 @@ async def listen_ais():
 
                 async for message_json in websocket:
                     if needs_resubscribe:
-                        # 🛠️ ログ強化：注文出し直し時にも最新リストを出力
                         print(f"📡 MMSIリストが更新されたので、新しい注文を送信します。対象MMSI: {current_tracking_mmsis}")
                         new_subscription_message = {
                             "APIKey": AIS_API_KEY,
+                            "BoundingBoxes": [[[-90, -180], [90, 180]]], # 🌍 ここも全世界指定！
                             "FiltersShipMMSI": current_tracking_mmsis
                         }
                         await websocket.send(json.dumps(new_subscription_message))
@@ -149,7 +148,6 @@ async def listen_ais():
                             try:
                                 response = requests.post(WEBHOOK_URL, json=payload, timeout=5)
                                 if response.status_code == 200:
-                                    # 🛠️ ログ強化：データベースへの送信が成功した時に完了ログを出力
                                     print(f" 🚀 データベースへの送信完了: {response.text}")
                                 else:
                                     print(f" ❌ 転送拒否: サーバー応答 {response.status_code} ({response.text})")
@@ -177,4 +175,3 @@ if __name__ == "__main__":
     threading.Thread(target=run_dummy_server, daemon=True).start()
     threading.Thread(target=run_mmsi_updater, daemon=True).start()
     asyncio.run(listen_ais())
-
