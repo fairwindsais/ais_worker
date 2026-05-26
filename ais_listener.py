@@ -10,13 +10,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 # ==========================================
 # 1. 設定エリア（必ず書き換えてください！）
 # ==========================================
-# AisStreamのAPIキー
 AIS_API_KEY = "2ec9dc1fe4dfa685ace12e3e3b23fd2c7582628e"
-
-# スターサーバーのドメイン（例: example.com）
 MY_DOMAIN = 'fair-winds.official.jp'
-
-# Webhookの合言葉（PHPと同じもの）
 WEBHOOK_SECRET = "fair_winds_secret_2026"
 
 # ==========================================
@@ -25,9 +20,10 @@ WEBHOOK_SECRET = "fair_winds_secret_2026"
 WEBHOOK_URL = f"https://{MY_DOMAIN}/api/update_ais.php"
 GET_MMSI_URL = f"https://{MY_DOMAIN}/api/get_tracking_mmsi.php"
 
-# グローバル変数（全機能で共有するデータ）
-current_tracking_mmsis = [] # 今監視しているMMSIリスト
-needs_resubscribe = False # 注文をやり直す必要があるかどうかのフラグ
+# グローバル変数
+current_tracking_mmsis = [] 
+needs_resubscribe = False   
+ship_cache = {} # ★追加：各船の最新データを記憶する辞書
 
 # ==========================================
 # 2. Renderスリープ防止用のダミーWebサーバー
@@ -38,7 +34,6 @@ class DummyHandler(BaseHTTPRequestHandler):
         self.send_header('Content-type', 'text/plain')
         self.end_headers()
         self.wfile.write(b"AIS Worker is running!")
-    
     def do_HEAD(self):
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
@@ -61,7 +56,6 @@ def fetch_mmsi_list():
         
         if response.status_code == 200:
             new_list = response.json()
-            
             if set(new_list) != set(current_tracking_mmsis):
                 print(f"🔄 監視対象のMMSIリストが更新されました: {len(new_list)}隻 {new_list}")
                 current_tracking_mmsis = new_list
@@ -70,7 +64,6 @@ def fetch_mmsi_list():
         else:
             print(f"⚠️ MMSIリストの取得失敗 (サーバー応答 {response.status_code})")
             return []
-            
     except Exception as e:
         print(f"⚠️ MMSIリスト取得時に通信エラー: {e}")
         return []
@@ -79,13 +72,12 @@ def fetch_mmsi_list():
 # 4. AISデータ受信＆転送メイン処理
 # ==========================================
 async def listen_ais():
-    global needs_resubscribe
+    global needs_resubscribe, ship_cache
     
     while True:
         try:
             async with websockets.connect("wss://stream.aisstream.io/v0/stream") as websocket:
                 print("✅ AisStreamに接続しました。")
-                
                 fetch_mmsi_list()
                 
                 if not current_tracking_mmsis:
@@ -98,7 +90,7 @@ async def listen_ais():
                     print(f"📡 【全世界・ピンポイント監視】{len(current_tracking_mmsis)}隻の追跡を開始します。対象MMSI: {current_tracking_mmsis}")
                     subscription_message = {
                         "APIKey": AIS_API_KEY,
-                        "BoundingBoxes": [[[-90, -180], [90, 180]]], # 🌍 エリア指定を必須とするため、全世界を指定！
+                        "BoundingBoxes": [[[-90, -180], [90, 180]]],
                         "FiltersShipMMSI": current_tracking_mmsis
                     }
                 
@@ -110,45 +102,78 @@ async def listen_ais():
                         print(f"📡 MMSIリストが更新されたので、新しい注文を送信します。対象MMSI: {current_tracking_mmsis}")
                         new_subscription_message = {
                             "APIKey": AIS_API_KEY,
-                            "BoundingBoxes": [[[-90, -180], [90, 180]]], # 🌍 ここも全世界指定！
+                            "BoundingBoxes": [[[-90, -180], [90, 180]]], 
                             "FiltersShipMMSI": current_tracking_mmsis
                         }
                         await websocket.send(json.dumps(new_subscription_message))
                         needs_resubscribe = False
                     
                     message = json.loads(message_json)
+                    msg_type = message.get("MessageType")
                     
-                    if message["MessageType"] == "PositionReport":
+                    # ★ 位置情報(PositionReport)と静的データ(ShipStaticData)の両方を拾う
+                    if msg_type in ["PositionReport", "ShipStaticData"]:
                         meta = message.get("MetaData", {})
-                        report = message.get("Message", {}).get("PositionReport", {})
-                        
                         mmsi = meta.get("MMSI")
                         ship_name = meta.get("ShipName", "不明").strip()
-                        lat = report.get("Latitude")
-                        lon = report.get("Longitude")
-                        cog = report.get("Cog")
-                        sog = report.get("Sog")
-                        status = report.get("NavigationalStatus", "不明")
-
-                        if not current_tracking_mmsis or str(mmsi) in current_tracking_mmsis:
-                            print(f"🚢 ターゲット受信！ [{mmsi}] {ship_name} (Lat: {lat}, Lon: {lon})")
+                        
+                        # ターゲット以外のMMSIは無視
+                        if current_tracking_mmsis and str(mmsi) not in current_tracking_mmsis:
+                            continue
+                            
+                        # 船の記憶（キャッシュ）がなければ初期化して作る
+                        if str(mmsi) not in ship_cache:
+                            ship_cache[str(mmsi)] = {
+                                "lat": None, "lon": None, "cog": None, "sog": None, 
+                                "status": "不明", "dest": "", "eta": ""
+                            }
+                            
+                        cache = ship_cache[str(mmsi)]
+                        
+                        # 1. 位置情報が来た場合は、緯度経度・針路・速力を上書き
+                        if msg_type == "PositionReport":
+                            report = message["Message"]["PositionReport"]
+                            cache["lat"] = report.get("Latitude")
+                            cache["lon"] = report.get("Longitude")
+                            cache["cog"] = report.get("Cog")
+                            cache["sog"] = report.get("Sog")
+                            cache["status"] = report.get("NavigationalStatus", "不明")
+                            
+                        # 2. 静的データが来た場合は、目的地とETAを上書き
+                        elif msg_type == "ShipStaticData":
+                            static = message["Message"]["ShipStaticData"]
+                            # AIS特有の不要な「@」を消す
+                            cache["dest"] = static.get("Destination", "").strip().replace("@", "")
+                            
+                            # ETA(到着予定)を MM/DD HH:MM 形式に変換する
+                            eta_data = static.get("Eta", {})
+                            month = eta_data.get("Month", 0)
+                            day = eta_data.get("Day", 0)
+                            hour = eta_data.get("Hour", 0)
+                            minute = eta_data.get("Minute", 0)
+                            if month > 0 and day > 0:
+                                cache["eta"] = f"{month:02d}/{day:02d} {hour:02d}:{minute:02d}"
+                        
+                        # 位置情報が1回でも取れていれば（latがNoneじゃなければ）PHPにフルセット送信！
+                        if cache["lat"] is not None:
+                            print(f"🚢 [{mmsi}] {ship_name} 更新 ({msg_type}) -> 転送中...")
                             
                             payload = {
                                 "secret": WEBHOOK_SECRET,
                                 "mmsi": mmsi,
-                                "lat": lat,
-                                "lon": lon,
-                                "cog": cog,
-                                "sog": sog,
-                                "status": status,
-                                "dest": meta.get("Destination", "").strip(),
-                                "eta": meta.get("ETA", "").strip()
+                                "lat": cache["lat"],
+                                "lon": cache["lon"],
+                                "cog": cache["cog"],
+                                "sog": cache["sog"],
+                                "status": cache["status"],
+                                "dest": cache["dest"],
+                                "eta": cache["eta"]
                             }
                             
                             try:
                                 response = requests.post(WEBHOOK_URL, json=payload, timeout=5)
                                 if response.status_code == 200:
-                                    print(f" 🚀 データベースへの送信完了: {response.text}")
+                                    print(f" 🚀 送信成功: Lat:{cache['lat']}, Dest:{cache['dest']}, ETA:{cache['eta']}")
                                 else:
                                     print(f" ❌ 転送拒否: サーバー応答 {response.status_code} ({response.text})")
                             except Exception as e:
