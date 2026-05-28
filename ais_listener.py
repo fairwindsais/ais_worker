@@ -5,7 +5,15 @@ import requests
 import os
 import threading
 import time
+import builtins
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
+# ==========================================
+# 🌟 Render用：ログを溜め込まず即座に画面に表示する魔法
+# ==========================================
+def print(*args, **kwargs):
+    kwargs["flush"] = True
+    builtins.print(*args, **kwargs)
 
 # ==========================================
 # 1. 設定エリア（必ず書き換えてください！）
@@ -38,6 +46,9 @@ class DummyHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
         self.end_headers()
+    def log_message(self, format, *args):
+        # 邪魔なWebサーバーのアクセスログを消す
+        pass
 
 def run_dummy_server():
     port = int(os.environ.get("PORT", 10000))
@@ -135,16 +146,15 @@ async def listen_ais():
                             cache["sog"] = report.get("Sog")
                             cache["status"] = report.get("NavigationalStatus", "不明")
                             
-                        # 🌟 修正ポイント：静的データのエラー（null対策）を完璧に防ぐ
                         elif msg_type == "ShipStaticData":
                             static = message.get("Message", {}).get("ShipStaticData", {})
                             
                             dest_raw = static.get("Destination")
-                            if dest_raw: # null(None)や空文字でない時だけ処理する
+                            if dest_raw: 
                                 cache["dest"] = str(dest_raw).strip().replace("@", "")
                             
                             eta_data = static.get("Eta")
-                            if isinstance(eta_data, dict): # 辞書型（データがある）時だけ処理する
+                            if isinstance(eta_data, dict):
                                 month = eta_data.get("Month") or 0
                                 day = eta_data.get("Day") or 0
                                 hour = eta_data.get("Hour") or 0
