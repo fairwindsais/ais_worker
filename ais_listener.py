@@ -23,7 +23,7 @@ GET_MMSI_URL = f"https://{MY_DOMAIN}/api/get_tracking_mmsi.php"
 # グローバル変数
 current_tracking_mmsis = [] 
 needs_resubscribe = False   
-ship_cache = {} # ★追加：各船の最新データを記憶する辞書
+ship_cache = {} 
 
 # ==========================================
 # 2. Renderスリープ防止用のダミーWebサーバー
@@ -111,17 +111,14 @@ async def listen_ais():
                     message = json.loads(message_json)
                     msg_type = message.get("MessageType")
                     
-                    # ★ 位置情報(PositionReport)と静的データ(ShipStaticData)の両方を拾う
                     if msg_type in ["PositionReport", "ShipStaticData"]:
                         meta = message.get("MetaData", {})
                         mmsi = meta.get("MMSI")
                         ship_name = meta.get("ShipName", "不明").strip()
                         
-                        # ターゲット以外のMMSIは無視
                         if current_tracking_mmsis and str(mmsi) not in current_tracking_mmsis:
                             continue
                             
-                        # 船の記憶（キャッシュ）がなければ初期化して作る
                         if str(mmsi) not in ship_cache:
                             ship_cache[str(mmsi)] = {
                                 "lat": None, "lon": None, "cog": None, "sog": None, 
@@ -130,7 +127,6 @@ async def listen_ais():
                             
                         cache = ship_cache[str(mmsi)]
                         
-                        # 1. 位置情報が来た場合は、緯度経度・針路・速力を上書き
                         if msg_type == "PositionReport":
                             report = message["Message"]["PositionReport"]
                             cache["lat"] = report.get("Latitude")
@@ -139,22 +135,23 @@ async def listen_ais():
                             cache["sog"] = report.get("Sog")
                             cache["status"] = report.get("NavigationalStatus", "不明")
                             
-                        # 2. 静的データが来た場合は、目的地とETAを上書き
+                        # 🌟 修正ポイント：静的データのエラー（null対策）を完璧に防ぐ
                         elif msg_type == "ShipStaticData":
-                            static = message["Message"]["ShipStaticData"]
-                            # AIS特有の不要な「@」を消す
-                            cache["dest"] = static.get("Destination", "").strip().replace("@", "")
+                            static = message.get("Message", {}).get("ShipStaticData", {})
                             
-                            # ETA(到着予定)を MM/DD HH:MM 形式に変換する
-                            eta_data = static.get("Eta", {})
-                            month = eta_data.get("Month", 0)
-                            day = eta_data.get("Day", 0)
-                            hour = eta_data.get("Hour", 0)
-                            minute = eta_data.get("Minute", 0)
-                            if month > 0 and day > 0:
-                                cache["eta"] = f"{month:02d}/{day:02d} {hour:02d}:{minute:02d}"
+                            dest_raw = static.get("Destination")
+                            if dest_raw: # null(None)や空文字でない時だけ処理する
+                                cache["dest"] = str(dest_raw).strip().replace("@", "")
+                            
+                            eta_data = static.get("Eta")
+                            if isinstance(eta_data, dict): # 辞書型（データがある）時だけ処理する
+                                month = eta_data.get("Month") or 0
+                                day = eta_data.get("Day") or 0
+                                hour = eta_data.get("Hour") or 0
+                                minute = eta_data.get("Minute") or 0
+                                if month > 0 and day > 0:
+                                    cache["eta"] = f"{month:02d}/{day:02d} {hour:02d}:{minute:02d}"
                         
-                        # 位置情報が1回でも取れていれば（latがNoneじゃなければ）PHPにフルセット送信！
                         if cache["lat"] is not None:
                             print(f"🚢 [{mmsi}] {ship_name} 更新 ({msg_type}) -> 転送中...")
                             
